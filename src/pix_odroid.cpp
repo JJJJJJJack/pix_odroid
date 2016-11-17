@@ -5,6 +5,10 @@
 #include "geometry_msgs/PoseStamped.h"
 #include "geometry_msgs/Vector3Stamped.h"
 #include "std_msgs/Float64.h"
+#include <mavros_msgs/CommandBool.h>
+#include <mavros_msgs/SetMode.h>
+#include <mavros_msgs/State.h>
+#include <mavros_msgs/RCIn.h>
 #include <tf/transform_datatypes.h>
 
 #include "pid.hpp"
@@ -12,6 +16,8 @@
 using namespace std;
 
 geometry_msgs::PoseStamped x_pose;
+mavros_msgs::State x_current_state;
+mavros_msgs::RCIn x_RCIn;
 bool RESET_PID=false;
 
 double get(
@@ -29,33 +35,48 @@ void GetRPY(geometry_msgs::Quaternion Q, double* roll, double* pitch, double* ya
     m.getRPY(roll[0],pitch[0],yaw[0]);
 }
 
-//#include </home/mahesh/catkin_ws/src/beginner_tutorials/src/Qualisys.h>
+//Callback functions
 void x_position_Callback(const geometry_msgs::PoseStamped& CurrPose)
 {
 	x_pose = CurrPose;
 	RESET_PID=true;
 }
+void state_Callback(const mavros_msgs::State& CurrState)
+{
+	x_current_state = CurrState;
+}
+void RCIn_Callback(const mavros_msgs::RCIn& CurrRCIn)
+{
+	x_RCIn = CurrRCIn;
+}
+
 
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "pub_setpoints");
+    ros::init(argc, argv, "pix_odroid");
     ros::NodeHandle n;
- 
-    ros::Publisher pub_att = n.advertise<geometry_msgs::PoseStamped>("/mavros/setpoint_attitude/attitude",100);
-    ros::Publisher pub_thr = n.advertise<std_msgs::Float64>("/mavros/setpoint_attitude/att_throttle", 100);
-    ros::Subscriber sub_position = n.subscribe("/mavros/local_position/pose", 1000, x_position_Callback);
+    //Publish topics
+    ros::Publisher pub_att = n.advertise<geometry_msgs::PoseStamped>("mavros/setpoint_attitude/attitude",100);
+    ros::Publisher pub_thr = n.advertise<std_msgs::Float64>("mavros/setpoint_attitude/att_throttle", 100);
+    //Subscribe topics
+    ros::Subscriber sub_position = n.subscribe("mavros/local_position/pose", 1000, x_position_Callback);
+    ros::Subscriber sub_state = n.subscribe("mavros/state", 1000, state_Callback);
+    ros::Subscriber sub_RCIn = n.subscribe("mavros/rc/in", 1000, RCIn_Callback);
+    //Service list
+    ros::ServiceClient arming_client = n.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
+    ros::ServiceClient set_mode_client = n.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
     ros::Rate loop_rate(100);
     ros::spinOnce();
+    
+    //Local variables
     geometry_msgs::PoseStamped cmd_att;
     std_msgs::Float64 cmd_thr;
     int count = 1;
-    double v[3]={1.0, 0.0, 0.0};
-    double lambda = 0.3;
- 
- 
-    double v_norm=sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
-    double theta=0.0;
+    mavros_msgs::SetMode x_offb_set_mode;
+    x_offb_set_mode.request.custom_mode="OFFBOARD";
+    mavros_msgs::CommandBool x_arm_cmd;
+    x_arm_cmd.request.value=true;
     
     PID m_pidX(get(n, "/pix_odroid/PIDs/X/kp"),
 		      get(n, "/pix_odroid/PIDs/X/kd"),
@@ -88,11 +109,32 @@ int main(int argc, char **argv)
 		      get(n, "/pix_odroid/PIDs/Yaw/maxOutput"),
 		      get(n, "/pix_odroid/PIDs/Yaw/integratorMin"),
 		      get(n, "/pix_odroid/PIDs/Yaw/integratorMax"),
-		      "yaw"); 
-
- 
+		      "yaw");
      
+    
+    //Wait for Fight Control Connection
+    while(ros::ok() && x_current_state.connected){
+        ros::spinOnce();
+        loop_rate.sleep();
+    }
+    
+    ros::Time last_request = ros::Time::now(); 
     while(ros::ok()){
+        //First set the flight mode as OFFBOARD
+        if(x_current_state.mode != "OFFBOARD" && (ros::Time::now()-last_request>ros::Duration(5.0))){
+            if(set_mode_client.call(x_offb_set_mode) && x_offb_set_mode.response.success)
+                ROS_INFO("Offboard Mode Enabled");
+            last_request = ros::Time::now(); 
+        }else{
+            if(!x_current_state.armed && (ros::Time::now()-last_request>ros::Duration(5.0))){
+                if(arming_client.call(x_arm_cmd) && x_arm_cmd.response.success)
+                    ROS_INFO("Robot Armed");
+                last_request = ros::Time::now(); 
+            }
+        }
+        
+        //cerr<<x_RCIn<<endl;
+
         //Get Roll Pitch Yaw
         double roll, pitch, yaw;
         GetRPY(x_pose.pose.orientation, &roll, &pitch, &yaw);
@@ -113,19 +155,22 @@ int main(int argc, char **argv)
 
         //Convert control effort to quaternion
         tf::Quaternion control_effort=tf::createQuaternionFromRPY(roll_cmd, pitch_cmd, yaw_cmd);
+        
+        if(count%100 == 0)
+            cerr<<roll_cmd<<"  "<<pitch_cmd<<"  "<<yaw_cmd<<endl;
 		
         //Create attitude command message
         cmd_att.header.stamp = ros::Time::now();
         cmd_att.header.seq=count;
         cmd_att.header.frame_id = 1;
-        cmd_att.pose.position.x = 0.0;//0.0;//0.001*some_object.position_x;
-        cmd_att.pose.position.y = 0.0;//0.001*some_object.position_y;
-        cmd_att.pose.position.z = 0.0;//0.001*some_object.position_z;
+        cmd_att.pose.position.x = 0.0;
+        cmd_att.pose.position.y = 0.0;
+        cmd_att.pose.position.z = 0.0;
      
-        cmd_att.pose.orientation.x = control_effort[0];//sin(theta/2.0)*v[0]/v_norm;
-        cmd_att.pose.orientation.y = control_effort[1];//sin(theta/2.0)*v[1]/v_norm;
-        cmd_att.pose.orientation.z = control_effort[2];//sin(theta/2.0)*v[2]/v_norm;
-        cmd_att.pose.orientation.w = control_effort[3];//cos(theta/2.0);
+        cmd_att.pose.orientation.x = control_effort[0];
+        cmd_att.pose.orientation.y = control_effort[1];
+        cmd_att.pose.orientation.z = control_effort[2];
+        cmd_att.pose.orientation.w = control_effort[3];
 
         //Create throttle command message
         cmd_thr.data = z_cmd;
@@ -134,7 +179,6 @@ int main(int argc, char **argv)
         pub_thr.publish(cmd_thr);
         ros::spinOnce();
         count++;
-        theta=0.3*sin(count/300.0);
         loop_rate.sleep();
    }
     
