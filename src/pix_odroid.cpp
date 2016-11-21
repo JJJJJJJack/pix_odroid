@@ -13,12 +13,21 @@
 
 #include "pid.hpp"
 
+#define LOOP_RATE 100
+#define IDLE_STATE     0
+#define TAKEOFF_STATE  1
+#define LANDING_STATE  2
+#define AUTOMATIC      4
+
 using namespace std;
 
 geometry_msgs::PoseStamped x_pose;
 mavros_msgs::State x_current_state;
 mavros_msgs::RCIn x_RCIn;
+geometry_msgs::PoseStamped x_goal;
 bool RESET_PID=false;
+double x_thrust=0;
+int x_state=IDLE_STATE;
 
 double get(
     const ros::NodeHandle& n,
@@ -49,9 +58,13 @@ void RCIn_Callback(const mavros_msgs::RCIn& CurrRCIn)
 {
 	x_RCIn = CurrRCIn;
 }
+void goal_Callback(const geometry_msgs::PoseStamped& Currgoal)
+{
+	x_goal = Currgoal;
+}
 
 
-
+//Main function
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "pix_odroid");
@@ -63,10 +76,11 @@ int main(int argc, char **argv)
     ros::Subscriber sub_position = n.subscribe("mavros/local_position/pose", 1000, x_position_Callback);
     ros::Subscriber sub_state = n.subscribe("mavros/state", 1000, state_Callback);
     ros::Subscriber sub_RCIn = n.subscribe("mavros/rc/in", 1000, RCIn_Callback);
+    ros::Subscriber sub_goal = n.subscribe("goal", 1000, goal_Callback);
     //Service list
     ros::ServiceClient arming_client = n.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
     ros::ServiceClient set_mode_client = n.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
-    ros::Rate loop_rate(100);
+    ros::Rate loop_rate(LOOP_RATE);
     ros::spinOnce();
     
     //Local variables
@@ -78,7 +92,7 @@ int main(int argc, char **argv)
     mavros_msgs::CommandBool x_arm_cmd;
     x_arm_cmd.request.value=true;
     
-    PID m_pidX(get(n, "/pix_odroid/PIDs/X/kp"),
+    PID x_pidX(get(n, "/pix_odroid/PIDs/X/kp"),
 		      get(n, "/pix_odroid/PIDs/X/kd"),
 		      get(n, "/pix_odroid/PIDs/X/ki"),
 		      get(n, "/pix_odroid/PIDs/X/minOutput"),
@@ -86,7 +100,7 @@ int main(int argc, char **argv)
 		      get(n, "/pix_odroid/PIDs/X/integratorMin"),
 		      get(n, "/pix_odroid/PIDs/X/integratorMax"),
 		      "x");
-    PID m_pidY(get(n, "/pix_odroid/PIDs/Y/kp"),
+    PID x_pidY(get(n, "/pix_odroid/PIDs/Y/kp"),
 		      get(n, "/pix_odroid/PIDs/Y/kd"),
 		      get(n, "/pix_odroid/PIDs/Y/ki"),
 		      get(n, "/pix_odroid/PIDs/Y/minOutput"),
@@ -94,7 +108,7 @@ int main(int argc, char **argv)
 		      get(n, "/pix_odroid/PIDs/Y/integratorMin"),
 		      get(n, "/pix_odroid/PIDs/Y/integratorMax"),
 		      "y");
-    PID m_pidZ(get(n, "/pix_odroid/PIDs/Z/kp"),
+    PID x_pidZ(get(n, "/pix_odroid/PIDs/Z/kp"),
 		      get(n, "/pix_odroid/PIDs/Z/kd"),
 		      get(n, "/pix_odroid/PIDs/Z/ki"),
 		      get(n, "/pix_odroid/PIDs/Z/minOutput"),
@@ -102,7 +116,7 @@ int main(int argc, char **argv)
 		      get(n, "/pix_odroid/PIDs/Z/integratorMin"),
 		      get(n, "/pix_odroid/PIDs/Z/integratorMax"),
 		      "z");
-    PID m_pidYaw(get(n, "/pix_odroid/PIDs/Yaw/kp"),
+    PID x_pidYaw(get(n, "/pix_odroid/PIDs/Yaw/kp"),
 		      get(n, "/pix_odroid/PIDs/Yaw/kd"),
 		      get(n, "/pix_odroid/PIDs/Yaw/ki"),
 		      get(n, "/pix_odroid/PIDs/Yaw/minOutput"),
@@ -133,31 +147,60 @@ int main(int argc, char **argv)
             }
         }
         
-        //cerr<<x_RCIn<<endl;
+        //Takeoff and landing switch based on RCIn FIXME
+        //Kill and back to manual control switch based on extra Input FIXME needs to decide
+        
+        //Control command
+        double roll_cmd=0, pitch_cmd=0, yaw_cmd=0, z_cmd=0;
 
         //Get Roll Pitch Yaw
         double roll, pitch, yaw;
         GetRPY(x_pose.pose.orientation, &roll, &pitch, &yaw);
         //Get desired
-        double x_desired=0;
-        double y_desired=0;
+        double x_desired=x_goal.pose.position.x;
+        double y_desired=x_goal.pose.position.y;
+        double z_desired=x_goal.pose.position.z;
         double yaw_desired=0;
         //Convert into body frame
         double x_error_local=x_pose.pose.position.x-x_desired;
         double y_error_local=x_pose.pose.position.y-y_desired;
         double x_error_body=-cos(yaw)*x_error_local+sin(yaw)*y_error_local;
         double y_error_body=sin(yaw)*x_error_local+cos(yaw)*y_error_local;
-        //PID controller
-	    double roll_cmd  = m_pidY.update(0.0, y_error_body, 0);
-       	double pitch_cmd = m_pidX.update(0.0, x_error_body, 0);
-       	double yaw_cmd   = m_pidYaw.update(yaw, yaw_desired, 0);
-       	double z_cmd     = m_pidZ.update(x_pose.pose.position.z, 1.5, 0);
+        
+        switch(x_state){
+            case TAKEOFF_STATE:{
+       	        //Take off logic
+                if(x_pose.pose.position.z>=0.05 || x_thrust>=0.9){
+                    x_state=AUTOMATIC;
+                    x_pidZ.setIntegral(x_thrust / x_pidZ.ki());
+                    x_thrust = 0;
+                    ROS_INFO("Takeoff Successfully! Automatic Control Now...");
+                }else{
+                    x_thrust+=0.1/LOOP_RATE;
+                    z_cmd = x_thrust;
+                }
+            }break;
+            case LANDING_STATE:{
+                //Landing logic FIXME
+            } //Intentional fall-thru
+            case AUTOMATIC:{
+                //PID controller
+	              roll_cmd  = x_pidY.update(0.0, y_error_body, 0);
+       	        pitch_cmd = x_pidX.update(0.0, x_error_body, 0);
+               	yaw_cmd   = x_pidYaw.update(yaw, yaw_desired, 0);
+               	z_cmd     = x_pidZ.update(x_pose.pose.position.z, z_desired, 0);
+               	//RCIn Mixer FIXME
+            }break;
+            case IDLE_STATE:{
+                roll_cmd  = 0;
+       	        pitch_cmd = 0;
+               	yaw_cmd   = 0;
+               	z_cmd     = 0;
+            }break;
+        }
 
         //Convert control effort to quaternion
         tf::Quaternion control_effort=tf::createQuaternionFromRPY(roll_cmd, pitch_cmd, yaw_cmd);
-        
-        if(count%100 == 0)
-            cerr<<roll_cmd<<"  "<<pitch_cmd<<"  "<<yaw_cmd<<endl;
 		
         //Create attitude command message
         cmd_att.header.stamp = ros::Time::now();
@@ -166,7 +209,6 @@ int main(int argc, char **argv)
         cmd_att.pose.position.x = 0.0;
         cmd_att.pose.position.y = 0.0;
         cmd_att.pose.position.z = 0.0;
-     
         cmd_att.pose.orientation.x = control_effort[0];
         cmd_att.pose.orientation.y = control_effort[1];
         cmd_att.pose.orientation.z = control_effort[2];
@@ -177,8 +219,11 @@ int main(int argc, char **argv)
        
         pub_att.publish(cmd_att);
         pub_thr.publish(cmd_thr);
+        //Remap local position to pose for trajectory_generate and record FIXME
         ros::spinOnce();
         count++;
+        if(count%100 == 0)
+            cerr<<".";
         loop_rate.sleep();
    }
     
