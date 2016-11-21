@@ -29,7 +29,7 @@ geometry_msgs::PoseStamped x_pose;
 mavros_msgs::State x_current_state;
 mavros_msgs::RCIn x_RCIn;
 geometry_msgs::PoseStamped x_goal;
-bool RESET_PID=false;
+bool RESET_PID=false, KILL_SWITCH=false;
 double x_thrust=0, x_landing_height=0;
 int x_state=IDLE_STATE;
 
@@ -78,11 +78,11 @@ int main(int argc, char **argv)
     ros::Publisher pub_thr = n.advertise<std_msgs::Float64>("mavros/setpoint_attitude/att_throttle", 100);
     //Subscribe topics
     ros::Subscriber sub_position = n.subscribe("mavros/local_position/pose", 1000, x_position_Callback);
-    ros::Subscriber sub_state = n.subscribe("mavros/state", 1000, state_Callback);
-    ros::Subscriber sub_RCIn = n.subscribe("mavros/rc/in", 1000, RCIn_Callback);
-    ros::Subscriber sub_goal = n.subscribe("goal", 1000, goal_Callback);
+    ros::Subscriber sub_state    = n.subscribe("mavros/state", 1000, state_Callback);
+    ros::Subscriber sub_RCIn     = n.subscribe("mavros/rc/in", 1000, RCIn_Callback);
+    ros::Subscriber sub_goal     = n.subscribe("goal", 1000, goal_Callback);
     //Service list
-    ros::ServiceClient arming_client = n.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
+    ros::ServiceClient arming_client   = n.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
     ros::ServiceClient set_mode_client = n.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
     ros::Rate loop_rate(LOOP_RATE);
     ros::spinOnce();
@@ -139,12 +139,14 @@ int main(int argc, char **argv)
     ros::Time last_request = ros::Time::now(); 
     while(ros::ok()){
         //First set the flight mode as OFFBOARD
-        if(x_current_state.mode != "OFFBOARD" && (ros::Time::now()-last_request>ros::Duration(5.0))){
+        if(x_current_state.mode != "OFFBOARD" && (ros::Time::now()-last_request>ros::Duration(5.0)) &&
+            KILL_SWITCH==false){
             if(set_mode_client.call(x_offb_set_mode) && x_offb_set_mode.response.success)
                 ROS_INFO("Offboard Mode Enabled");
             last_request = ros::Time::now(); 
         }else{
-            if(!x_current_state.armed && (ros::Time::now()-last_request>ros::Duration(5.0))){
+            if(!x_current_state.armed && (ros::Time::now()-last_request>ros::Duration(5.0)) && 
+                KILL_SWITCH==false){
                 if(arming_client.call(x_arm_cmd) && x_arm_cmd.response.success)
                     ROS_INFO("Robot Armed");
                 last_request = ros::Time::now(); 
@@ -162,7 +164,16 @@ int main(int argc, char **argv)
         if(roll_RC>1800 && pitch_RC<1100 && throttle_RC<1100 && yaw_RC>1800){
             x_state=LANDING_STATE;
         }
-        //Kill and back to manual control switch based on extra Input FIXME needs to decide
+        //Kill the quad in the air
+        if(yaw_RC==RC_MIN && throttle_RC==RC_MIN){
+            mavros_msgs::SetMode x_manual_set_mode;
+            x_manual_set_mode.request.custom_mode="MANUAL";
+            set_mode_client.call(x_manual_set_mode);
+            //Set kill switch to true to prevent re-arm
+            KILL_SWITCH=true;
+            ROS_INFO("Emergency Kill");
+        }
+        //Save the quad in manual control need extra input
         
         //Control command
         double roll_cmd=0, pitch_cmd=0, yaw_cmd=0, z_cmd=0;
