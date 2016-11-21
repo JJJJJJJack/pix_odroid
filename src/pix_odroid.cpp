@@ -18,6 +18,10 @@
 #define TAKEOFF_STATE  1
 #define LANDING_STATE  2
 #define AUTOMATIC      4
+#define RC_MAX         1893
+#define RC_MIN         1092
+#define RC_MID         ((RC_MAX+RC_MIN)/2.0)
+#define RC_RANGE       (RC_MAX-RC_MIN)
 
 using namespace std;
 
@@ -26,7 +30,7 @@ mavros_msgs::State x_current_state;
 mavros_msgs::RCIn x_RCIn;
 geometry_msgs::PoseStamped x_goal;
 bool RESET_PID=false;
-double x_thrust=0;
+double x_thrust=0, x_landing_height=0;
 int x_state=IDLE_STATE;
 
 double get(
@@ -147,7 +151,17 @@ int main(int argc, char **argv)
             }
         }
         
-        //Takeoff and landing switch based on RCIn FIXME
+        //Takeoff and landing switch based on RCIn
+        int roll_RC    = x_RCIn.channels[0];
+        int pitch_RC   = x_RCIn.channels[1];
+        int throttle_RC= x_RCIn.channels[2];
+        int yaw_RC     = x_RCIn.channels[3];
+        if(roll_RC<1100 && pitch_RC<1100 && throttle_RC<1100 && yaw_RC>1800){
+            x_state=TAKEOFF_STATE;
+        }
+        if(roll_RC>1800 && pitch_RC<1100 && throttle_RC<1100 && yaw_RC>1800){
+            x_state=LANDING_STATE;
+        }
         //Kill and back to manual control switch based on extra Input FIXME needs to decide
         
         //Control command
@@ -181,7 +195,13 @@ int main(int argc, char **argv)
                 }
             }break;
             case LANDING_STATE:{
-                //Landing logic FIXME
+                //Landing logic
+                if(x_pose.pose.position.z>0.03){
+                    x_landing_height-=0.5/LOOP_RATE;
+                    z_desired+=x_landing_height;
+                }else{
+                    x_state=IDLE_STATE;
+                }
             } //Intentional fall-thru
             case AUTOMATIC:{
                 //PID controller
@@ -189,7 +209,13 @@ int main(int argc, char **argv)
        	        pitch_cmd = x_pidX.update(0.0, x_error_body, 0);
                	yaw_cmd   = x_pidYaw.update(yaw, yaw_desired, 0);
                	z_cmd     = x_pidZ.update(x_pose.pose.position.z, z_desired, 0);
-               	//RCIn Mixer FIXME
+               	//RCIn Mixer
+               	double remap_rc_roll = (roll_RC-RC_MID)/(RC_RANGE*2.0);
+               	double remap_rc_pitch= (pitch_RC-RC_MID)/(RC_RANGE*2.0);
+               	double remap_rc_yaw  = (yaw_RC-RC_MID)/(RC_RANGE*2.0);
+               	roll_cmd  += remap_rc_roll;
+               	pitch_cmd += remap_rc_pitch;
+               	yaw_cmd   += remap_rc_yaw;
             }break;
             case IDLE_STATE:{
                 roll_cmd  = 0;
