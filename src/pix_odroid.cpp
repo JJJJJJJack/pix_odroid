@@ -13,7 +13,10 @@
 
 #include "pid.hpp"
 
-#define LOOP_RATE 100
+//Define TEST_COMM to test communication
+#define TEST_COMM
+
+#define LOOP_RATE      100
 #define IDLE_STATE     0
 #define TAKEOFF_STATE  1
 #define LANDING_STATE  2
@@ -171,6 +174,7 @@ int main(int argc, char **argv)
             set_mode_client.call(x_manual_set_mode);
             //Set kill switch to true to prevent re-arm
             KILL_SWITCH=true;
+            x_state=IDLE_STATE;
             ROS_INFO("Emergency Kill");
         }
         //Save the quad in manual control need extra input
@@ -194,6 +198,9 @@ int main(int argc, char **argv)
         
         switch(x_state){
             case TAKEOFF_STATE:{
+                #ifdef TEST_COMM
+                x_state=AUTOMATIC;
+                #endif
        	        //Take off logic
                 if(x_pose.pose.position.z>=0.05 || x_thrust>=0.9){
                     x_state=AUTOMATIC;
@@ -216,17 +223,25 @@ int main(int argc, char **argv)
             } //Intentional fall-thru
             case AUTOMATIC:{
                 //PID controller
-	              roll_cmd  = x_pidY.update(0.0, y_error_body, 0);
+	            roll_cmd  = x_pidY.update(0.0, y_error_body, 0);
        	        pitch_cmd = x_pidX.update(0.0, x_error_body, 0);
                	yaw_cmd   = x_pidYaw.update(yaw, yaw_desired, 0);
                	z_cmd     = x_pidZ.update(x_pose.pose.position.z, z_desired, 0);
                	//RCIn Mixer
-               	double remap_rc_roll = (roll_RC-RC_MID)/(RC_RANGE*2.0);
-               	double remap_rc_pitch= (pitch_RC-RC_MID)/(RC_RANGE*2.0);
-               	double remap_rc_yaw  = (yaw_RC-RC_MID)/(RC_RANGE*2.0);
+               	double remap_rc_roll = (roll_RC-RC_MID)/(RC_RANGE/2.0);
+               	double remap_rc_pitch= (pitch_RC-RC_MID)/(RC_RANGE/2.0);
+               	double remap_rc_yaw  = (yaw_RC-RC_MID)/(RC_RANGE/2.0);
                	roll_cmd  += remap_rc_roll;
                	pitch_cmd += remap_rc_pitch;
                	yaw_cmd   += remap_rc_yaw;
+               	//Cancel PID input while test communivation
+               	#ifdef TEST_COMM
+               	    double remap_rc_throttle  = (throttle_RC-RC_MIN)/RC_RANGE;
+                   	roll_cmd  = remap_rc_roll;
+                   	pitch_cmd = remap_rc_pitch;
+                   	yaw_cmd   = remap_rc_yaw;
+                   	z_cmd     = remap_rc_throttle;
+                #endif
             }break;
             case IDLE_STATE:{
                 roll_cmd  = 0;
