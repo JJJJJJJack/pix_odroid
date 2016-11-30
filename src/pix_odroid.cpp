@@ -21,8 +21,8 @@
 #define TAKEOFF_STATE  1
 #define LANDING_STATE  2
 #define AUTOMATIC      4
-#define RC_MAX         1893
-#define RC_MIN         1092
+#define RC_MAX         1901
+#define RC_MIN         1099
 #define RC_MID         ((RC_MAX+RC_MIN)/2.0)
 #define RC_RANGE       (RC_MAX-RC_MIN)
 
@@ -134,7 +134,7 @@ int main(int argc, char **argv)
      
     
     //Wait for Fight Control Connection
-    while(ros::ok() && x_current_state.connected){
+    while(ros::ok() && !x_current_state.connected){
         ros::spinOnce();
         loop_rate.sleep();
     }
@@ -144,9 +144,9 @@ int main(int argc, char **argv)
         //First set the flight mode as OFFBOARD
         if(x_current_state.mode != "OFFBOARD" && (ros::Time::now()-last_request>ros::Duration(5.0)) &&
             KILL_SWITCH==false){
-            if(set_mode_client.call(x_offb_set_mode) && x_offb_set_mode.response.success)
-                ROS_INFO("Offboard Mode Enabled");
-            last_request = ros::Time::now(); 
+            //if(set_mode_client.call(x_offb_set_mode) && x_offb_set_mode.response.success)
+            //    ROS_INFO("Offboard Mode Enabled");
+            //last_request = ros::Time::now(); 
         }else{
             if(!x_current_state.armed && (ros::Time::now()-last_request>ros::Duration(5.0)) && 
                 KILL_SWITCH==false){
@@ -161,21 +161,29 @@ int main(int argc, char **argv)
         int pitch_RC   = x_RCIn.channels[1];
         int throttle_RC= x_RCIn.channels[2];
         int yaw_RC     = x_RCIn.channels[3];
-        if(roll_RC<1100 && pitch_RC<1100 && throttle_RC<1100 && yaw_RC>1800){
+        int state_RC   = x_RCIn.channels[4];
+        int kill_RC    = x_RCIn.channels[6];
+        if(state_RC>=(RC_MAX-100)  && x_state!=AUTOMATIC && x_state!=TAKEOFF_STATE){
+            ROS_INFO("TAKE OFF ENABLED");
             x_state=TAKEOFF_STATE;
         }
-        if(roll_RC>1800 && pitch_RC<1100 && throttle_RC<1100 && yaw_RC>1800){
+        if(state_RC<=(RC_MIN+100) && x_state!=LANDING_STATE){
+            ROS_INFO("LANDING ENABLED");
             x_state=LANDING_STATE;
         }
         //Kill the quad in the air
-        if(yaw_RC==RC_MIN && throttle_RC==RC_MIN){
+        if(kill_RC<(RC_MIN+100) && KILL_SWITCH!=true){
             mavros_msgs::SetMode x_manual_set_mode;
             x_manual_set_mode.request.custom_mode="MANUAL";
-            set_mode_client.call(x_manual_set_mode);
+            if(x_current_state.mode != "MANUAL")
+                set_mode_client.call(x_manual_set_mode);
             //Set kill switch to true to prevent re-arm
             KILL_SWITCH=true;
             x_state=IDLE_STATE;
-            ROS_INFO("Emergency Kill");
+            ROS_INFO("KILL SWITCH ON");
+        }else if(kill_RC>(RC_MAX-100) && KILL_SWITCH==true){
+            KILL_SWITCH=false;
+            ROS_INFO("KILL SWITCH OFF");
         }
         //Save the quad in manual control need extra input
         
@@ -199,6 +207,7 @@ int main(int argc, char **argv)
         switch(x_state){
             case TAKEOFF_STATE:{
                 #ifdef TEST_COMM
+                ROS_INFO("!!!FALL IN TAKEOFF LOOP!!!");
                 x_state=AUTOMATIC;
                 #endif
        	        //Take off logic
@@ -229,14 +238,14 @@ int main(int argc, char **argv)
                	z_cmd     = x_pidZ.update(x_pose.pose.position.z, z_desired, 0);
                	//RCIn Mixer
                	double remap_rc_roll = (roll_RC-RC_MID)/(RC_RANGE/2.0);
-               	double remap_rc_pitch= (pitch_RC-RC_MID)/(RC_RANGE/2.0);
-               	double remap_rc_yaw  = (yaw_RC-RC_MID)/(RC_RANGE/2.0);
+               	double remap_rc_pitch=-(pitch_RC-RC_MID)/(RC_RANGE/2.0);
+               	double remap_rc_yaw  =-(yaw_RC-RC_MID)/(RC_RANGE/2.0);
                	roll_cmd  += remap_rc_roll;
                	pitch_cmd += remap_rc_pitch;
                	yaw_cmd   += remap_rc_yaw;
                	//Cancel PID input while test communivation
                	#ifdef TEST_COMM
-               	    double remap_rc_throttle  = (throttle_RC-RC_MIN)/RC_RANGE;
+               	    double remap_rc_throttle  = (throttle_RC-RC_MIN)/(float)RC_RANGE;
                    	roll_cmd  = remap_rc_roll;
                    	pitch_cmd = remap_rc_pitch;
                    	yaw_cmd   = remap_rc_yaw;
