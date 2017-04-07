@@ -1,3 +1,6 @@
+// Created 12-23-2016
+// Xiang He
+// For research only
 #include <ros/ros.h>
 #include <std_msgs/String.h> 
 #include <stdio.h>
